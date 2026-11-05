@@ -1,0 +1,49 @@
+name: Spike - yt-dlp runner network test
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: "A single short video URL from the test channel"
+        required: true
+        default: "https://www.youtube.com/@learndagbani9379/videos"
+
+permissions: {}
+
+concurrency:
+  group: spike-ytdlp-runner-test
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install yt-dlp
+        run: pip install -U yt-dlp
+
+      - name: Runner egress IP (for reference only)
+        run: curl -s https://api.ipify.org || true
+
+      - name: List channel videos (flat, no download)
+        run: |
+          yt-dlp --flat-playlist --simulate --dump-json \
+            "https://www.youtube.com/@learndagbani9379/videos" \
+            | tee /tmp/listing.jsonl
+          echo "---"
+          echo "videos found: $(wc -l < /tmp/listing.jsonl)"
+
+      - name: Resolve real stream URL for first video (this is what actually trips bot-check)
+        run: |
+          first_id=$(head -n1 /tmp/listing.jsonl | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          echo "first_id=$first_id"
+          yt-dlp -f "bv*[height<=360]+ba/b[height<=360]" --simulate --no-warnings -v \
+            "https://www.youtube.com/watch?v=$first_id"
+
+      - name: Actually download the smallest available format of that one video
+        run: |
+          first_id=$(head -n1 /tmp/listing.jsonl | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          mkdir -p /tmp/probe
+          yt-dlp -f "worst" -o "/tmp/probe/%(id)s.%(ext)s" \
+            "https://www.youtube.com/watch?v=$first_id"
+          ls -la /tmp/probe
