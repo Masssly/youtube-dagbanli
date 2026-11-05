@@ -51,11 +51,15 @@ jobs:
 
       - name: Resolve real stream URL for first video (this is what actually trips bot-check)
         run: |
-          first_id=$(head -n1 /tmp/listing.jsonl | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-          echo "first_id=$first_id (channel video, exact command that worked for dQw4w9WgXcQ)"
-          yt-dlp -v --simulate --skip-download "https://www.youtube.com/watch?v=$first_id"
-          echo "=== now the known-good control video, same run, same IP ==="
-          yt-dlp -v --simulate --skip-download "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+          set +e
+          ids=$(python3 -c "import json; [print(json.loads(l)['id']) for l in open('/tmp/listing.jsonl')]")
+          for id in $ids; do
+            echo "=== channel video $id ==="
+            yt-dlp -v --simulate --skip-download "https://www.youtube.com/watch?v=$id" 2>&1 | grep -i "playability\|ERROR:\|Generating POT\|poToken"
+          done
+          echo "=== control: known-popular video, same run, same IP ==="
+          yt-dlp -v --simulate --skip-download "https://www.youtube.com/watch?v=dQw4w9WgXcQ" 2>&1 | grep -i "playability\|ERROR:\|Generating POT\|poToken"
+          exit 0
 
       - name: Actually download the smallest available format of that one video
         run: |
