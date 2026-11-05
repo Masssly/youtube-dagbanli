@@ -17,6 +17,11 @@ jobs:
       - name: Install yt-dlp
         run: pip install -U yt-dlp
 
+      - name: Install Deno (JS runtime yt-dlp needs for the n-challenge)
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+
       - name: Write cookies to a temp file
         run: |
           printf '%s' "$YOUTUBE_COOKIES" > /tmp/cookies.txt
