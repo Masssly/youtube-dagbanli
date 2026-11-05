@@ -195,6 +195,14 @@ def download_video(video_id: str, workdir: Path) -> None:
     ])
 
 
+def has_video_stream(path: Path) -> bool:
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True,
+    )
+    return proc.returncode == 0 and proc.stdout.strip() != ""
+
+
 def upload_video_artifacts(s3, bucket: str, prefix: str, workdir: Path) -> list[str]:
     uploaded = []
 
@@ -206,6 +214,12 @@ def upload_video_artifacts(s3, bucket: str, prefix: str, workdir: Path) -> list[
     info = json.loads(info_json.read_text(encoding="utf-8")) if info_json else {}
 
     video_file = next((p for p in workdir.glob("video.*") if p.suffix.lower() in {".mp4", ".mkv", ".webm"}), None)
+    if video_file and not has_video_stream(video_file):
+        # yt-dlp can resolve "bv*+ba/b" down to an audio-only stream with no error
+        # at all when the real video formats fail to resolve (seen in testing: a
+        # byte-identical duplicate of the separately-downloaded audio file, silently
+        # accepted as "the video"). Never upload that as if it were valid.
+        raise RuntimeError(f"downloaded 'video' file has no video stream ({video_file.name}, {video_file.stat().st_size} bytes)")
     if video_file:
         put(video_file, f"{prefix}video{video_file.suffix}")
 
@@ -236,28 +250,29 @@ def upload_video_artifacts(s3, bucket: str, prefix: str, workdir: Path) -> list[
     return uploaded
 
 
-def read_manifest_files(s3, bucket: str, prefix: str) -> list[str] | None:
+# Bumped once: every manifest written before this had no guarantee the "video" file
+# it listed actually contained a video stream (two separate bugs did exactly that -
+# a filename collision, and yt-dlp silently settling for an audio-only format with
+# no error). A manifest missing this exact version is treated as incomplete, which
+# forces every existing video to be re-validated and re-uploaded once.
+MANIFEST_SCHEMA_VERSION = 2
+
+
+def read_manifest(s3, bucket: str, prefix: str) -> dict | None:
     try:
         obj = s3.get_object(Bucket=bucket, Key=f"{prefix}manifest.json")
     except ClientError as exc:
         if exc.response["Error"]["Code"] in ("404", "NoSuchKey"):
             return None
         raise
-    manifest = json.loads(obj["Body"].read())
-    return manifest.get("files", [])
+    return json.loads(obj["Body"].read())
 
 
 def process_video(s3, bucket: str, slug: str, video_id: str, workdir_root: Path) -> tuple[str, dict | None]:
-    """Returns ('new'|'skipped', extra) - extra carries {title, files} for 'new', else None.
-
-    A manifest only counts as complete if it actually lists a video file: an
-    earlier bug wrote a manifest for videos where the video upload silently
-    failed, which would otherwise mark them done forever. Re-check content,
-    not just existence.
-    """
+    """Returns ('new'|'skipped', extra) - extra carries {title, files} for 'new', else None."""
     prefix = f"channels/{slug}/videos/{video_id}/"
-    existing_files = read_manifest_files(s3, bucket, prefix)
-    if existing_files is not None and any(f"{prefix}video" in f for f in existing_files):
+    existing = read_manifest(s3, bucket, prefix)
+    if existing is not None and existing.get("schema_version") == MANIFEST_SCHEMA_VERSION:
         return "skipped", None
 
     workdir = workdir_root / video_id
@@ -268,6 +283,7 @@ def process_video(s3, bucket: str, slug: str, video_id: str, workdir_root: Path)
         info_json = next(workdir.glob("video.info.json"), None)
         title = json.loads(info_json.read_text(encoding="utf-8")).get("title", video_id) if info_json else video_id
         manifest = {
+            "schema_version": MANIFEST_SCHEMA_VERSION,
             "video_id": video_id,
             "channel_slug": slug,
             "title": title,
