@@ -54,6 +54,7 @@ jobs:
           first_id=$(head -n1 /tmp/listing.jsonl | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
           echo "first_id=$first_id"
           yt-dlp -f "bv*[height<=360]+ba/b[height<=360]" --simulate --no-warnings -v \
+            --extractor-args "youtube:player_client=web" \
             "https://www.youtube.com/watch?v=$first_id"
 
       - name: Actually download the smallest available format of that one video
