@@ -78,7 +78,9 @@ def normalise_url(value: str) -> str:
     value = value.strip()
     if not value:
         raise ValueError("Please provide a channel URL.")
-    if not value.startswith(("https://", "http://")):
+    if value.startswith("@"):
+        value = "https://www.youtube.com/" + value
+    elif not value.startswith(("https://", "http://")):
         value = "https://" + value
     parsed = urlparse(value)
     if parsed.netloc.lower() not in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}:
