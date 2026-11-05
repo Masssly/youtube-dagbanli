@@ -39,7 +39,7 @@ Clone the repository and install the command:
 ```bash
 git clone https://github.com/Masssly/youtube-dagbanli.git
 cd youtube-dagbanli
-./install.sh
+bash install.sh
 ```
 
 The installer creates an isolated Python environment and places the `ydl` launcher in `~/.local/bin`. Make sure that directory is on your PATH.
