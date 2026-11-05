@@ -270,12 +270,14 @@ def main() -> None:
 
         log(f"{len(video_ids)} video(s) found.")
 
+        consecutive_bot_checks = 0
         for video_id in video_ids:
             if time.monotonic() - start > TIME_BUDGET_SECONDS:
                 result.deferred += 1
                 continue
             try:
                 outcome = process_video(s3, bucket, slug, video_id, workdir_root)
+                consecutive_bot_checks = 0
                 if outcome == "new":
                     result.new += 1
                     log(f"  {video_id}: downloaded and uploaded")
@@ -283,12 +285,17 @@ def main() -> None:
                 else:
                     result.skipped += 1
             except BotCheckTriggered as exc:
-                aborted_reason = (
-                    f"YouTube's bot-check reappeared mid-run (not necessarily an expired "
-                    f"cookie — could be request-rate related): {exc}"
-                )
-                result.errors.append(str(exc))
-                break
+                consecutive_bot_checks += 1
+                result.errors.append(f"{video_id}: bot-check ({exc})")
+                log(f"  {video_id}: bot-check triggered - {exc}")
+                # One bot-check hit can be a quirk of that one video; two in a row is
+                # the session itself failing (expired/invalid cookies), so stop there.
+                if consecutive_bot_checks >= 2:
+                    aborted_reason = (
+                        "YouTube's bot-check triggered on two videos in a row - this looks "
+                        f"like the cookie session itself, not a single video: {exc}"
+                    )
+                    break
             except Exception as exc:
                 result.errors.append(f"{video_id}: {exc}")
                 log(f"  {video_id}: ERROR - {exc}")
