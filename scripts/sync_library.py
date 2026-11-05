@@ -22,7 +22,9 @@ from google.oauth2 import service_account
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
 SHEET_RANGE = "Sheet1!A2:D5000"
-SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+CAPTURED_VIDEOS_RANGE = "'Captured videos'!A:H"
+SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+R2_PUBLIC_BASE_URL = "https://pub-442a1ed98c1a44938b232fa937be8956.r2.dev"
 TIME_BUDGET_SECONDS = 5 * 3600 + 40 * 60  # stop starting new videos with ~20min to spare in the 6h job limit
 MANUAL_SUB_LANGS = "all"
 AUTO_SUB_LANGS = "en,dag"
@@ -55,11 +57,14 @@ def channel_slug(url: str) -> str:
     return slug or "channel"
 
 
-def read_sheet_channels() -> list[dict]:
+def get_sheet_credentials() -> service_account.Credentials:
     sa_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
     creds = service_account.Credentials.from_service_account_info(sa_info, scopes=SHEET_SCOPES)
     creds.refresh(GoogleAuthRequest())
+    return creds
 
+
+def read_sheet_channels(creds: service_account.Credentials) -> list[dict]:
     sheet_id = os.environ["GOOGLE_SHEET_ID"]
     resp = requests.get(
         f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{SHEET_RANGE}",
@@ -81,6 +86,34 @@ def read_sheet_channels() -> list[dict]:
     return channels
 
 
+def log_captured_video(
+    creds: service_account.Credentials, channel_name: str, title: str, video_id: str, files: list[str]
+) -> None:
+    def link_for(marker: str) -> str:
+        key = next((f for f in files if marker in f), None)
+        return f"{R2_PUBLIC_BASE_URL}/{key}" if key else ""
+
+    row = [
+        channel_name,
+        title,
+        video_id,
+        link_for("/video."),
+        link_for("/audio."),
+        link_for("/metadata.json"),
+        link_for("/thumbnail."),
+        datetime.now(timezone.utc).isoformat(),
+    ]
+    sheet_id = os.environ["GOOGLE_SHEET_ID"]
+    resp = requests.post(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{CAPTURED_VIDEOS_RANGE}:append",
+        params={"valueInputOption": "RAW"},
+        headers={"Authorization": f"Bearer {creds.token}"},
+        json={"values": [row]},
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+
 def write_cookies() -> None:
     cookies = os.environ.get("YOUTUBE_COOKIES", "")
     if not cookies:
@@ -95,11 +128,12 @@ def ytdlp_base_args() -> list[str]:
 class BotCheckTriggered(Exception):
     """Raised when YouTube's 'sign in to confirm' gate reappears mid-run.
 
-    This is not necessarily an expired cookie: it showed up once after ~7 rapid
-    requests in under a minute (3 yt-dlp invocations x 2 videos), which looks like
-    YouTube re-challenging a session under request-burst pressure rather than the
-    cookie itself going stale. Either way the safe response is the same: stop
-    immediately rather than fail identically on every remaining video.
+    In testing this showed up on one video, then kept failing on every later
+    video and every later run against the same cookies, even with no requests
+    in between - it stuck, rather than being specific to that one video or to
+    request bursts. A fresh cookie export cleared it immediately. So treat one
+    occurrence as possibly a quirk, but two in a row as the cookie session
+    itself having gone bad - see the two-in-a-row check below.
     """
 
 
@@ -128,28 +162,28 @@ def list_channel_video_ids(url: str) -> list[str]:
     return ids
 
 
-def object_exists(s3, bucket: str, key: str) -> bool:
-    try:
-        s3.head_object(Bucket=bucket, Key=key)
-        return True
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] in ("404", "NoSuchKey"):
-            return False
-        raise
-
-
 def download_video(video_id: str, workdir: Path) -> None:
-    """Two yt-dlp invocations per video, not four: each invocation re-does webpage
-    and per-client player-API fetches from scratch, and a burst of those in a short
-    window is what triggers YouTube's bot-check mid-run, not expired cookies."""
+    """Three yt-dlp invocations, each with its own output basename.
+
+    An earlier version tried to cut this to two by requesting both the merged
+    video and standalone audio in one invocation via a comma-separated format
+    spec sharing one output template. That collided: both outputs resolved to
+    the same filename (manual.webm), so audio silently overwrote video on disk
+    and the video was never uploaded. Distinct basenames make that impossible."""
     video_url = f"https://www.youtube.com/watch?v={video_id}"
 
     run_ytdlp(ytdlp_base_args() + [
-        "-f", "bv*+ba/b,ba", "--merge-output-format", "mp4",
+        "-f", "bv*+ba/b", "--merge-output-format", "mp4",
         "--write-info-json", "--write-thumbnail",
         "--write-subs", "--sub-langs", MANUAL_SUB_LANGS, "--sub-format", "vtt/best",
         "--no-playlist",
-        "-o", str(workdir / "manual.%(ext)s"),
+        "-o", str(workdir / "video.%(ext)s"),
+        video_url,
+    ])
+
+    run_ytdlp(ytdlp_base_args() + [
+        "-f", "bestaudio", "--no-playlist",
+        "-o", str(workdir / "audio.%(ext)s"),
         video_url,
     ])
 
@@ -168,26 +202,18 @@ def upload_video_artifacts(s3, bucket: str, prefix: str, workdir: Path) -> list[
         s3.upload_file(str(local), bucket, key)
         uploaded.append(key)
 
-    info_json = next(workdir.glob("manual.info.json"), None)
+    info_json = next(workdir.glob("video.info.json"), None)
     info = json.loads(info_json.read_text(encoding="utf-8")) if info_json else {}
 
-    # --merge-output-format mp4 forces the merged video to exactly manual.mp4 whenever
-    # a merge happens; the standalone `ba` output keeps its native (non-mp4) container,
-    # so the two can't collide except in the rare case a video has no separate streams
-    # to merge at all (then yt-dlp keeps whatever single pre-muxed format it already has).
-    non_media_suffixes = {".json", ".jpg", ".jpeg", ".png", ".webp", ".vtt"}
-    video_file = next(workdir.glob("manual.mp4"), None)
+    video_file = next((p for p in workdir.glob("video.*") if p.suffix.lower() in {".mp4", ".mkv", ".webm"}), None)
     if video_file:
         put(video_file, f"{prefix}video{video_file.suffix}")
 
-    audio_file = next(
-        (p for p in workdir.glob("manual.*") if p != video_file and p.suffix.lower() not in non_media_suffixes),
-        None,
-    )
+    audio_file = next((p for p in workdir.glob("audio.*") if p.suffix.lower() != ".json"), None)
     if audio_file:
         put(audio_file, f"{prefix}audio{audio_file.suffix}")
 
-    thumb_file = next((p for p in workdir.glob("manual.*") if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}), None)
+    thumb_file = next((p for p in workdir.glob("video.*") if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}), None)
     if thumb_file:
         put(thumb_file, f"{prefix}thumbnail{thumb_file.suffix}")
 
@@ -199,8 +225,8 @@ def upload_video_artifacts(s3, bucket: str, prefix: str, workdir: Path) -> list[
             desc_path.write_text(description, encoding="utf-8")
             put(desc_path, f"{prefix}description.txt")
 
-    for sub_file in workdir.glob("manual.*.vtt"):
-        lang = sub_file.name[len("manual."):-len(".vtt")]
+    for sub_file in workdir.glob("video.*.vtt"):
+        lang = sub_file.name[len("video."):-len(".vtt")]
         put(sub_file, f"{prefix}subtitles/{lang}.vtt")
 
     for sub_file in workdir.glob("auto.*.vtt"):
@@ -210,27 +236,48 @@ def upload_video_artifacts(s3, bucket: str, prefix: str, workdir: Path) -> list[
     return uploaded
 
 
-def process_video(s3, bucket: str, slug: str, video_id: str, workdir_root: Path) -> str:
-    """Returns 'new' or 'skipped'."""
+def read_manifest_files(s3, bucket: str, prefix: str) -> list[str] | None:
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=f"{prefix}manifest.json")
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            return None
+        raise
+    manifest = json.loads(obj["Body"].read())
+    return manifest.get("files", [])
+
+
+def process_video(s3, bucket: str, slug: str, video_id: str, workdir_root: Path) -> tuple[str, dict | None]:
+    """Returns ('new'|'skipped', extra) - extra carries {title, files} for 'new', else None.
+
+    A manifest only counts as complete if it actually lists a video file: an
+    earlier bug wrote a manifest for videos where the video upload silently
+    failed, which would otherwise mark them done forever. Re-check content,
+    not just existence.
+    """
     prefix = f"channels/{slug}/videos/{video_id}/"
-    if object_exists(s3, bucket, f"{prefix}manifest.json"):
-        return "skipped"
+    existing_files = read_manifest_files(s3, bucket, prefix)
+    if existing_files is not None and any(f"{prefix}video" in f for f in existing_files):
+        return "skipped", None
 
     workdir = workdir_root / video_id
     workdir.mkdir(parents=True, exist_ok=True)
     try:
         download_video(video_id, workdir)
         uploaded = upload_video_artifacts(s3, bucket, prefix, workdir)
+        info_json = next(workdir.glob("video.info.json"), None)
+        title = json.loads(info_json.read_text(encoding="utf-8")).get("title", video_id) if info_json else video_id
         manifest = {
             "video_id": video_id,
             "channel_slug": slug,
+            "title": title,
             "uploaded_at": datetime.now(timezone.utc).isoformat(),
             "files": uploaded,
         }
         manifest_path = workdir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         s3.upload_file(str(manifest_path), bucket, f"{prefix}manifest.json")
-        return "new"
+        return "new", {"title": title, "files": uploaded}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -248,7 +295,8 @@ def main() -> None:
         region_name="auto",
     )
 
-    channels = [c for c in read_sheet_channels() if c["active"]]
+    sheet_creds = get_sheet_credentials()
+    channels = [c for c in read_sheet_channels(sheet_creds) if c["active"]]
     log(f"{len(channels)} active channel(s) in the sheet.")
 
     results: list[ChannelResult] = []
@@ -276,11 +324,15 @@ def main() -> None:
                 result.deferred += 1
                 continue
             try:
-                outcome = process_video(s3, bucket, slug, video_id, workdir_root)
+                outcome, extra = process_video(s3, bucket, slug, video_id, workdir_root)
                 consecutive_bot_checks = 0
                 if outcome == "new":
                     result.new += 1
                     log(f"  {video_id}: downloaded and uploaded")
+                    try:
+                        log_captured_video(sheet_creds, channel["name"], extra["title"], video_id, extra["files"])
+                    except Exception as exc:
+                        log(f"  {video_id}: uploaded, but could not log to the sheet: {exc}")
                     time.sleep(INTER_VIDEO_DELAY_SECONDS)
                 else:
                     result.skipped += 1
