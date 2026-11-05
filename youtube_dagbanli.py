@@ -189,7 +189,7 @@ def sync_channels(args: argparse.Namespace) -> None:
             audio_command = [
                 yt_dlp, "--yes-playlist", "--ignore-errors", "--continue",
                 "--no-overwrites", "--download-archive", str(AUDIO_ARCHIVE_FILE),
-                "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
+                "--format", "bestaudio/best", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
                 "--write-info-json", "--output", output, "--windows-filenames",
                 "--trim-filenames", "180",
             ]
