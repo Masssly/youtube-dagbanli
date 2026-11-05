@@ -27,6 +27,7 @@ TIME_BUDGET_SECONDS = 5 * 3600 + 40 * 60  # stop starting new videos with ~20min
 MANUAL_SUB_LANGS = "all"
 AUTO_SUB_LANGS = "en,dag"
 COOKIES_PATH = "/tmp/yt-cookies.txt"
+INTER_VIDEO_DELAY_SECONDS = 8  # spaces out requests; a burst is what triggered re-challenge in testing
 
 COOKIE_EXPIRED_MARKER = "sign in to confirm"
 
@@ -91,8 +92,15 @@ def ytdlp_base_args() -> list[str]:
     return ["yt-dlp", "--cookies", COOKIES_PATH, "--remote-components", "ejs:github", "--no-warnings"]
 
 
-class CookiesExpired(Exception):
-    pass
+class BotCheckTriggered(Exception):
+    """Raised when YouTube's 'sign in to confirm' gate reappears mid-run.
+
+    This is not necessarily an expired cookie: it showed up once after ~7 rapid
+    requests in under a minute (3 yt-dlp invocations x 2 videos), which looks like
+    YouTube re-challenging a session under request-burst pressure rather than the
+    cookie itself going stale. Either way the safe response is the same: stop
+    immediately rather than fail identically on every remaining video.
+    """
 
 
 def run_ytdlp(args: list[str]) -> None:
@@ -100,7 +108,7 @@ def run_ytdlp(args: list[str]) -> None:
     if proc.returncode != 0:
         stderr = proc.stderr.lower()
         if COOKIE_EXPIRED_MARKER in stderr:
-            raise CookiesExpired(proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "cookies expired")
+            raise BotCheckTriggered(proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "bot-check triggered")
         raise RuntimeError(proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else f"yt-dlp exited {proc.returncode}")
 
 
@@ -131,10 +139,13 @@ def object_exists(s3, bucket: str, key: str) -> bool:
 
 
 def download_video(video_id: str, workdir: Path) -> None:
+    """Two yt-dlp invocations per video, not four: each invocation re-does webpage
+    and per-client player-API fetches from scratch, and a burst of those in a short
+    window is what triggers YouTube's bot-check mid-run, not expired cookies."""
     video_url = f"https://www.youtube.com/watch?v={video_id}"
 
     run_ytdlp(ytdlp_base_args() + [
-        "-f", "bv*+ba/b", "--merge-output-format", "mp4",
+        "-f", "bv*+ba/b,ba", "--merge-output-format", "mp4",
         "--write-info-json", "--write-thumbnail",
         "--write-subs", "--sub-langs", MANUAL_SUB_LANGS, "--sub-format", "vtt/best",
         "--no-playlist",
@@ -149,12 +160,6 @@ def download_video(video_id: str, workdir: Path) -> None:
         video_url,
     ])
 
-    run_ytdlp(ytdlp_base_args() + [
-        "-f", "bestaudio", "--no-playlist",
-        "-o", str(workdir / "audio.%(ext)s"),
-        video_url,
-    ])
-
 
 def upload_video_artifacts(s3, bucket: str, prefix: str, workdir: Path) -> list[str]:
     uploaded = []
@@ -166,11 +171,19 @@ def upload_video_artifacts(s3, bucket: str, prefix: str, workdir: Path) -> list[
     info_json = next(workdir.glob("manual.info.json"), None)
     info = json.loads(info_json.read_text(encoding="utf-8")) if info_json else {}
 
-    video_file = next((p for p in workdir.glob("manual.*") if p.suffix.lower() in {".mp4", ".mkv", ".webm"}), None)
+    # --merge-output-format mp4 forces the merged video to exactly manual.mp4 whenever
+    # a merge happens; the standalone `ba` output keeps its native (non-mp4) container,
+    # so the two can't collide except in the rare case a video has no separate streams
+    # to merge at all (then yt-dlp keeps whatever single pre-muxed format it already has).
+    non_media_suffixes = {".json", ".jpg", ".jpeg", ".png", ".webp", ".vtt"}
+    video_file = next(workdir.glob("manual.mp4"), None)
     if video_file:
         put(video_file, f"{prefix}video{video_file.suffix}")
 
-    audio_file = next((p for p in workdir.glob("audio.*") if p.name != "audio.info.json"), None)
+    audio_file = next(
+        (p for p in workdir.glob("manual.*") if p != video_file and p.suffix.lower() not in non_media_suffixes),
+        None,
+    )
     if audio_file:
         put(audio_file, f"{prefix}audio{audio_file.suffix}")
 
@@ -266,10 +279,14 @@ def main() -> None:
                 if outcome == "new":
                     result.new += 1
                     log(f"  {video_id}: downloaded and uploaded")
+                    time.sleep(INTER_VIDEO_DELAY_SECONDS)
                 else:
                     result.skipped += 1
-            except CookiesExpired as exc:
-                aborted_reason = f"YOUTUBE_COOKIES secret appears expired: {exc}"
+            except BotCheckTriggered as exc:
+                aborted_reason = (
+                    f"YouTube's bot-check reappeared mid-run (not necessarily an expired "
+                    f"cookie — could be request-rate related): {exc}"
+                )
                 result.errors.append(str(exc))
                 break
             except Exception as exc:
