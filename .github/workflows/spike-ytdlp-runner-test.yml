@@ -22,6 +22,17 @@ jobs:
       - name: Install yt-dlp
         run: pip install -U yt-dlp
 
+      - name: Install Deno (JS runtime yt-dlp needs to solve YouTube's challenge)
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+
+      - name: Install PO token provider plugin
+        run: pip install -U bgutil-ytdlp-pot-provider
+
+      - name: Show yt-dlp's view of available providers
+        run: yt-dlp --version && yt-dlp -v --simulate --skip-download "https://www.youtube.com/watch?v=dQw4w9WgXcQ" 2>&1 | grep -i "pot\]\|js runtime\|extractor" | head -20
+
       - name: Runner egress IP (for reference only)
         run: curl -s https://api.ipify.org || true
 
