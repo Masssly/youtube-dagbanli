@@ -1,0 +1,75 @@
+name: Spike - R2 credentials test
+
+on:
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: spike-r2-test
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Show which account/bucket vars are set (names/values are not secret)
+        run: |
+          echo "R2_ACCOUNT_ID is set: $([ -n "$R2_ACCOUNT_ID" ] && echo yes || echo NO)"
+          echo "R2_ENDPOINT is set: $([ -n "$R2_ENDPOINT" ] && echo yes || echo NO)"
+          echo "R2_BUCKET is set: $([ -n "$R2_BUCKET" ] && echo yes || echo NO)"
+          echo "R2_ENDPOINT value: $R2_ENDPOINT"
+          echo "R2_BUCKET value: $R2_BUCKET"
+        env:
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+
+      - name: Put, list, head, get, delete a test object
+        run: |
+          pip install -q boto3
+          python3 - <<'PY'
+          import boto3, os, sys
+
+          endpoint = os.environ["R2_ENDPOINT"]
+          bucket = os.environ["R2_BUCKET"]
+          key = "_ci/smoke-test.txt"
+          body = b"youtube-dagbanli R2 smoke test"
+
+          s3 = boto3.client(
+              "s3",
+              endpoint_url=endpoint,
+              aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+              aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+              region_name="auto",
+          )
+
+          print("Putting object...")
+          s3.put_object(Bucket=bucket, Key=key, Body=body)
+
+          print("Listing bucket...")
+          resp = s3.list_objects_v2(Bucket=bucket, Prefix="_ci/")
+          keys = [o["Key"] for o in resp.get("Contents", [])]
+          print("Keys under _ci/:", keys)
+          assert key in keys, "uploaded key not found in listing"
+
+          print("Head object...")
+          head = s3.head_object(Bucket=bucket, Key=key)
+          print("ContentLength:", head["ContentLength"])
+          assert head["ContentLength"] == len(body)
+
+          print("Get object and verify content...")
+          got = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+          assert got == body, f"content mismatch: {got!r}"
+
+          print("Deleting object...")
+          s3.delete_object(Bucket=bucket, Key=key)
+
+          print("R2 smoke test passed.")
+          PY
+        env:
+          R2_ENDPOINT: ${{ vars.R2_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
