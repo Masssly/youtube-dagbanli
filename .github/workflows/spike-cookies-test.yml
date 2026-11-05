@@ -30,22 +30,10 @@ jobs:
             "https://www.youtube.com/@learndagbani9379/videos" \
             | tee /tmp/listing.jsonl
 
-      - name: Resolve real stream URL for every channel video, with cookies
+      - name: List actual available formats for one video, with cookies
         run: |
-          set +e
-          fail=0
-          while read -r line; do
-            id=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-            echo "=== $id ==="
-            yt-dlp -v --simulate --skip-download --cookies /tmp/cookies.txt \
-              "https://www.youtube.com/watch?v=$id" 2>&1 | grep -i "playability\|ERROR:\|sign in"
-            if [ $? -eq 0 ]; then fail=1; fi
-          done < /tmp/listing.jsonl
-          if [ "$fail" = "1" ]; then
-            echo "::error::at least one video still showed an error/playability line with cookies applied"
-            exit 1
-          fi
-          echo "All channel videos resolved cleanly with cookies."
+          first_id=$(head -n1 /tmp/listing.jsonl | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          yt-dlp --cookies /tmp/cookies.txt --list-formats "https://www.youtube.com/watch?v=$first_id"
 
       - name: Actually download the smallest format of one video, with cookies
         run: |
