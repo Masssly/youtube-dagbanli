@@ -18,6 +18,11 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      bgutil-pot:
+        image: brainicism/bgutil-ytdlp-pot-provider
+        ports:
+          - 4416:4416
     steps:
       - name: Install yt-dlp
         run: pip install -U yt-dlp
