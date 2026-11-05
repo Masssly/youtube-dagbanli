@@ -1,0 +1,56 @@
+name: Spike - cookie auth test
+
+on:
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: spike-cookies-test
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install yt-dlp
+        run: pip install -U yt-dlp
+
+      - name: Write cookies to a temp file
+        run: |
+          printf '%s' "$YOUTUBE_COOKIES" > /tmp/cookies.txt
+          wc -l /tmp/cookies.txt
+        env:
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+
+      - name: List channel videos (flat, no download)
+        run: |
+          yt-dlp --flat-playlist --simulate --dump-json \
+            "https://www.youtube.com/@learndagbani9379/videos" \
+            | tee /tmp/listing.jsonl
+
+      - name: Resolve real stream URL for every channel video, with cookies
+        run: |
+          set +e
+          fail=0
+          while read -r line; do
+            id=$(echo "$line" | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+            echo "=== $id ==="
+            yt-dlp -v --simulate --skip-download --cookies /tmp/cookies.txt \
+              "https://www.youtube.com/watch?v=$id" 2>&1 | grep -i "playability\|ERROR:\|sign in"
+            if [ $? -eq 0 ]; then fail=1; fi
+          done < /tmp/listing.jsonl
+          if [ "$fail" = "1" ]; then
+            echo "::error::at least one video still showed an error/playability line with cookies applied"
+            exit 1
+          fi
+          echo "All channel videos resolved cleanly with cookies."
+
+      - name: Actually download the smallest format of one video, with cookies
+        run: |
+          first_id=$(head -n1 /tmp/listing.jsonl | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+          mkdir -p /tmp/probe
+          yt-dlp -f "worst" --cookies /tmp/cookies.txt -o "/tmp/probe/%(id)s.%(ext)s" \
+            "https://www.youtube.com/watch?v=$first_id"
+          ls -la /tmp/probe
