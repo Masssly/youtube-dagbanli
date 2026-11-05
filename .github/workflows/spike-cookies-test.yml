@@ -38,12 +38,12 @@ jobs:
       - name: List actual available formats for one video, with cookies
         run: |
           first_id=$(head -n1 /tmp/listing.jsonl | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-          yt-dlp --cookies /tmp/cookies.txt --list-formats "https://www.youtube.com/watch?v=$first_id"
+          yt-dlp --remote-components ejs:github --cookies /tmp/cookies.txt --list-formats "https://www.youtube.com/watch?v=$first_id"
 
       - name: Actually download the smallest format of one video, with cookies
         run: |
           first_id=$(head -n1 /tmp/listing.jsonl | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
           mkdir -p /tmp/probe
-          yt-dlp -f "worst" --cookies /tmp/cookies.txt -o "/tmp/probe/%(id)s.%(ext)s" \
+          yt-dlp -f "worst" --remote-components ejs:github --cookies /tmp/cookies.txt -o "/tmp/probe/%(id)s.%(ext)s" \
             "https://www.youtube.com/watch?v=$first_id"
           ls -la /tmp/probe
