@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube-dagbanli"
+version = "0.1.0"
+description = "A local-first incremental YouTube channel archive manager"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Masssly" }]
+dependencies = []
+
+[project.scripts]
+ydl = "youtube_dagbanli:main"
+
+[tool.setuptools]
+py-modules = ["youtube_dagbanli"]
