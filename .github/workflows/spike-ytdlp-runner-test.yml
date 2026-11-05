@@ -52,10 +52,10 @@ jobs:
       - name: Resolve real stream URL for first video (this is what actually trips bot-check)
         run: |
           first_id=$(head -n1 /tmp/listing.jsonl | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-          echo "first_id=$first_id"
-          yt-dlp -f "bv*[height<=360]+ba/b[height<=360]" --simulate --no-warnings -v \
-            --extractor-args "youtube:player_client=web" \
-            "https://www.youtube.com/watch?v=$first_id"
+          echo "first_id=$first_id (channel video, exact command that worked for dQw4w9WgXcQ)"
+          yt-dlp -v --simulate --skip-download "https://www.youtube.com/watch?v=$first_id"
+          echo "=== now the known-good control video, same run, same IP ==="
+          yt-dlp -v --simulate --skip-download "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
       - name: Actually download the smallest available format of that one video
         run: |
