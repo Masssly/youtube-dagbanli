@@ -226,9 +226,10 @@ def build_catalogue(library: Path) -> int:
         video_id = info.get("id", "")
         stem = info_path.name[:-len(".info.json")]
         folder = info_path.parent
-        video = next((p for p in folder.glob(stem + ".*") if p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}), None)
-        audio = next(iter(folder.glob(stem + ".mp3")), None)
-        thumb = next((p for p in folder.glob(stem + ".*") if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}), None)
+        siblings = [p for p in folder.iterdir() if p.stem == stem]
+        video = next((p for p in siblings if p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}), None)
+        audio = next((p for p in siblings if p.suffix.lower() == ".mp3"), None)
+        thumb = next((p for p in siblings if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}), None)
         duration = info.get("duration")
         rows.append({
             "channel": info.get("channel") or folder.name,
